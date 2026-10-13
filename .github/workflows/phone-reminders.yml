@@ -1,0 +1,49 @@
+name: Phone reminders
+
+on:
+  schedule:
+    - cron: '2-57/5 * * * *'
+    # A monthly maintenance commit prevents GitHub's 60-day inactivity shutdown.
+    - cron: '17 3 1 * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: phone-reminders-${{ github.event.schedule || 'manual' }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: github.repository == 'kylob89-arch/k2-phone-reminders-scheduler' && github.ref == 'refs/heads/main' && github.event.schedule != '17 3 1 * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Send due reminders
+        env:
+          REMINDER_SECRET: ${{ secrets.PHONE_REMINDERS_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          test -n "$REMINDER_SECRET" || { echo 'Missing PHONE_REMINDERS_CRON_SECRET repository secret'; exit 1; }
+          curl --fail-with-body --silent --show-error --retry 2 --retry-delay 5 --max-time 50 \
+            --header "Authorization: Bearer $REMINDER_SECRET" \
+            'https://app.dietk.pl/api/phone-reminders?action=dispatch'
+
+  maintain-schedule:
+    if: github.repository == 'kylob89-arch/k2-phone-reminders-scheduler' && github.ref == 'refs/heads/main' && (github.event.schedule == '17 3 1 * *' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: write
+    steps:
+      - name: Record monthly scheduler maintenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          endpoint='repos/kylob89-arch/k2-phone-reminders-scheduler/contents/scheduler-heartbeat.json'
+          current_sha=$(gh api "$endpoint" --jq '.sha')
+          content=$(printf '{"lastMaintenance":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" | base64 -w0)
+          jq -n --arg content "$content" --arg sha "$current_sha" \
+            '{message:"chore: keep reminder schedule active",content:$content,sha:$sha,branch:"main"}' \
+            | gh api --method PUT "$endpoint" --input - > /dev/null
